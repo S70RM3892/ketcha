@@ -49,8 +49,14 @@ input.derived { background: var(--accent-weak); }
 .range { display: block; color: var(--muted); font-size: .72rem; }
 .diff.pos { color: var(--good); } .diff.neg { color: var(--bad); }
 tr.hidden { display: none; }
-.sum { display: flex; flex-wrap: wrap; gap: 8px 24px; font-size: .95rem; }
-.sum b { font-size: 1.15rem; }
+h2 { font-size: 1rem; margin: 0 0 8px; }
+.tot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.tot:last-child { border-bottom: 0; }
+.tot .label { font-weight: 600; min-width: 9em; }
+.tot .dev { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+.tot .meta { color: var(--muted); font-size: .8rem; }
+details { margin-top: 8px; }
+summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
 .notes { font-size: .8rem; color: var(--muted); }
 .notes li { margin-bottom: 4px; }
 code { font-size: .85em; }
@@ -88,7 +94,15 @@ code { font-size: .85em; }
   </div>
 
   <div class="card">
-    <div class="sum" id="sum"></div>
+    <h2>総合偏差値（推定）</h2>
+    <div id="total"></div>
+    <details>
+      <summary>推定のしくみ・設定</summary>
+      <p class="notes">合計点の標準偏差は非公表なので、各科目の偏差値を配点で重み付けして合成する：<br>
+      <code>総合 = 50 + 10 × Σ wᵢzᵢ ÷ √(Σwᵢ² + 2ρ Σ wᵢwⱼ)</code>（zᵢ = (偏差値ᵢ − 50)/10、wᵢ = 配点/100）。<br>
+      ρ（科目間の相関）は、実際の成績表2人分（第2回の総合1・総合2）にあわせて 0.82 にした。第1回の成績表で検算すると誤差は 0.1〜1.1 ポイント。目安は ±1 程度。</p>
+      <label class="notes">ρ = <input type="number" id="rho" step="0.01" min="0" max="1" value="0.82"></label>
+    </details>
   </div>
 
   <div class="card notes">
@@ -97,7 +111,8 @@ code { font-size: .85em; }
       <li>偏差値は受験者<b>全体</b>の平均・標準偏差で計算される。現役・高卒別の標準偏差は非公表なので、現役平均は参考表示のみ。</li>
       <li>成績表の偏差値は小数第1位で丸められているため、逆算した得点には「±」の幅がある（下段の範囲）。</li>
       <li>データは「平均点速報」（2026年10月3日作成）。成績返却時の確定値とずれる可能性あり。</li>
-      <li>総合偏差値は合計点の標準偏差が無いと計算できないため出していない。下の合計点は単純合計。</li>
+      <li>総合1 = 英数国理（英語・数学・国語・理科2科目、800点）、総合2 = 英数理（600点）。国語は 現古漢 → 現・古 → 現代文、数学は III型 → II型 → I型 の順で、入力がある科目を使う。</li>
+      <li>総合偏差値は合計点の標準偏差が非公表なので推定値。くわしくは「推定のしくみ」を参照。</li>
     </ul>
   </div>
 </main>
@@ -111,8 +126,8 @@ const DATA = [
   ["数学II型",  200, 75.5, 72.2, 117.3, 51.8, false],
   ["数学III型", 200, 69.6, 65.4, 92.6,  40.0, true],
   ["現代文",   150, 61.6, 61.0, 71.5,  18.7, false],
-  ["現・古",   200, 80.7, 80.3, 83.8,  19.4, true],
-  ["現古漢",   200, 72.9, 72.0, 84.9,  22.5, false],
+  ["現・古",   200, 80.7, 80.3, 83.8,  19.4, false],
+  ["現古漢",   200, 72.9, 72.0, 84.9,  22.5, true],
   ["物理",     100, 29.2, 26.5, 45.6,  20.7, true],
   ["化学",     100, 32.7, 30.4, 47.1,  17.8, true],
   ["生物",     100, 34.5, 32.2, 48.7,  17.9, false],
@@ -204,17 +219,53 @@ function update(i, fromUser = false) {
   renderSum();
 }
 
-function renderSum() {
-  let total = 0, max = 0, n = 0;
-  DATA.forEach((s, i) => {
-    const sc = rowScore(i);
-    if (sc === null || rowEls[i].tr.classList.contains("hidden")) return;
-    total += Math.min(Math.max(sc, 0), s.max); max += s.max; n++;
-  });
-  document.getElementById("sum").innerHTML = n
-    ? `<span>入力科目数 <b>${n}</b></span><span>合計 <b>${fmt(total)}</b> / ${max}</span><span>得点率 <b>${fmt(100 * total / max)}%</b></span>`
-    : `<span class="notes">偏差値か得点を入れると合計がここに出る。</span>`;
+const idx = name => DATA.findIndex(s => s.name === name);
+const firstEntered = names => names.map(idx).filter(i => rowScore(i) !== null);
+const zOf = i => (rowScore(i) - DATA[i].mean) / DATA[i].sd;
+const rhoEl = document.getElementById("rho");
+
+// 総合の構成科目を集める。足りない教科があれば missing に入れる
+function pickSubjects(withKokugo) {
+  const picked = [], missing = [];
+  const one = (label, names) => { const f = firstEntered(names); f.length ? picked.push(f[0]) : missing.push(label); };
+  one("英語", ["英語"]);
+  one("数学", ["数学III型", "数学II型", "数学I型"]);
+  if (withKokugo) one("国語", ["現古漢", "現・古", "現代文"]);
+  const sci = firstEntered(["物理", "化学", "生物", "地学"]).slice(0, 2);
+  picked.push(...sci);
+  if (sci.length < 2) missing.push(`理科あと${2 - sci.length}科目`);
+  return { picked, missing };
 }
+
+// 配点重み付きで偏差値を合成する（相関 rho を仮定）
+function composite(picked, rho) {
+  const w = picked.map(i => DATA[i].max / 100);
+  const z = picked.map(zOf);
+  const sw = w.reduce((a, b) => a + b, 0);
+  const sw2 = w.reduce((a, b) => a + b * b, 0);
+  const cross = (sw * sw - sw2) / 2;
+  const zt = w.reduce((a, wi, k) => a + wi * z[k], 0) / Math.sqrt(sw2 + 2 * rho * cross);
+  return 50 + 10 * zt;
+}
+
+function renderSum() {
+  let rho = parseFloat(rhoEl.value);
+  if (!Number.isFinite(rho)) rho = 0.82;
+  rho = Math.min(Math.max(rho, 0), 1);
+  const html = [["総合1（英数国理）", true], ["総合2（英数理）", false]].map(([label, withK]) => {
+    const { picked, missing } = pickSubjects(withK);
+    if (missing.length) {
+      return `<div class="tot"><span class="label">${label}</span><span class="meta">未入力：${missing.join("・")}</span></div>`;
+    }
+    const total = picked.reduce((a, i) => a + Math.min(Math.max(rowScore(i), 0), DATA[i].max), 0);
+    const max = picked.reduce((a, i) => a + DATA[i].max, 0);
+    return `<div class="tot"><span class="label">${label}</span><span class="dev">${fmt(composite(picked, rho))}</span>
+      <span class="meta">${fmt(total)} / ${max}点（${fmt(100 * total / max)}%）・${picked.map(i => DATA[i].name).join(" ")}</span></div>`;
+  }).join("");
+  document.getElementById("total").innerHTML = html;
+}
+
+rhoEl.addEventListener("input", renderSum);
 
 function applyVisibility() {
   showAll.checked = state.showAll;
